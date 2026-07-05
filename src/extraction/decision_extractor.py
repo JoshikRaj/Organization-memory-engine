@@ -1,13 +1,16 @@
 """
 extraction/decision_extractor.py
-Uses an LLM (OpenAI) to identify architectural decisions inside Jira issues and Git commits.
 
-A "decision" = someone chose X over Y for reason Z.
-Examples:
-  - "We chose KRaft over ZooKeeper to remove the external dependency"
-  - "Switched to async replication to improve throughput at the cost of durability"
+This is the CORE differentiator of the entire project.
 
-Run with: python -m src.extraction.decision_extractor
+While every RAG chatbot finds documents, this module extracts DECISIONS —
+the actual choices made, why they were made, who made them, and what
+alternatives were considered.
+
+This is what lets us answer:
+  "Why did Apache Kafka move away from ZooKeeper?"
+  instead of just:
+  "Find documents that mention ZooKeeper"
 """
 
 import json
@@ -17,140 +20,190 @@ import time
 from typing import Optional
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from google import genai
+from pydantic import BaseModel, Field
 
 from src.storage.database import get_connection
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ── Prompt template ────────────────────────────────────────────────────────────
-DECISION_PROMPT = """You are analyzing Apache Kafka project documents to extract architectural decisions.
 
-A decision is when the team chose one approach over another, with a stated reason.
+# ── Pydantic schema ──────────────────────────────────────────────
+# This is the structured output we force the LLM to return.
+# Pydantic validates it — if the LLM returns garbage JSON, we catch it.
 
-Document text:
-\"\"\"
+class DecisionSchema(BaseModel):
+    contains_decision: bool = Field(
+        description="True if this text contains a clear technical or architectural decision"
+    )
+    decision_text: Optional[str] = Field(
+        None,
+        description="One sentence summary of the decision made"
+    )
+    rationale: Optional[str] = Field(
+        None,
+        description="Why this decision was made — the reasoning behind it"
+    )
+    people_involved: list[str] = Field(
+        default_factory=list,
+        description="Names of people who proposed or approved this decision"
+    )
+    alternatives_considered: list[str] = Field(
+        default_factory=list,
+        description="Other options that were considered but rejected"
+    )
+    confidence: float = Field(
+        default=0.0,
+        description="Your confidence this is a real decision, 0.0 to 1.0"
+    )
+
+
+# ── Extraction prompt ────────────────────────────────────────────
+# This prompt is everything.
+
+DECISION_EXTRACTION_PROMPT = """You are analyzing organizational communication to extract technical decisions.
+
+A DECISION is when a team or person:
+- Chooses one technical approach over another
+- Deprecates or replaces a component
+- Agrees to a design that will be implemented
+- Rejects a proposal with a stated reason
+
+NOT a decision:
+- Bug reports without resolution
+- Questions without answers
+- General discussion without conclusion
+- Status updates
+
+Analyze the following text and extract any decision present.
+
+TEXT:
 {text}
-\"\"\"
 
-Extract any architectural or technical decisions from this text.
-If there are no clear decisions, return an empty list.
-
-Respond ONLY with valid JSON in this exact format:
+Respond ONLY with a JSON object. No explanation, no markdown, just raw JSON.
+Use this exact structure:
 {{
-  "decisions": [
-    {{
-      "decision_text": "One sentence describing what was decided",
-      "rationale": "Why this decision was made (or null if not stated)",
-      "people_involved": ["Name1", "Name2"],
-      "alternatives_considered": ["Alternative A", "Alternative B"]
-    }}
-  ]
+  "contains_decision": true or false,
+  "decision_text": "one sentence — what was decided",
+  "rationale": "why this was decided",
+  "people_involved": ["Name1", "Name2"],
+  "alternatives_considered": ["option A", "option B"],
+  "confidence": 0.0 to 1.0
 }}
-"""
+
+If no decision is present, set contains_decision to false and all other fields to null or empty."""
 
 
-def extract_decisions_llm(text: str, doc_id: int) -> list[dict]:
+# ── LLM call function ────────────────────────────────────────────
+
+def extract_decision_from_text(text: str) -> Optional[DecisionSchema]:
     """
-    Sends text to OpenAI and parses the returned decisions.
-    Returns a list of decision dicts ready to insert.
+    Calls Gemini Flash to extract a decision from text.
+    Returns a validated DecisionSchema or None if extraction fails.
+
+    Uses Google Gemini (free tier: 15 RPM, 1M tokens/day) instead of
+    OpenAI to avoid API costs during development.
     """
-    # Truncate to stay well within token limits (~3000 tokens ≈ 12000 chars)
-    text = text[:12000]
+    # Truncate to ~2000 tokens to save cost
+    # Most decisions are captured in the first part of the text anyway
+    text = text[:6000]
+
+    if not text.strip():
+        return None
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",          # cheap and fast — good enough for extraction
-            messages=[
-                {"role": "user", "content": DECISION_PROMPT.format(text=text)}
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                DECISION_EXTRACTION_PROMPT.format(text=text)
             ],
-            temperature=0,               # deterministic output
-            max_tokens=1000,
-            response_format={"type": "json_object"},
+            config={
+                "system_instruction": "You extract structured data from text. Always respond with valid JSON only.",
+                "temperature": 0.1,
+                "max_output_tokens": 500,
+            },
         )
 
-        raw = response.choices[0].message.content
-        parsed = json.loads(raw)
-        decisions_raw = parsed.get("decisions", [])
+        raw = response.text.strip()
 
-        results = []
-        for d in decisions_raw:
-            if not d.get("decision_text"):
-                continue
-            results.append({
-                "doc_id": doc_id,
-                "decision_text": d.get("decision_text", ""),
-                "rationale": d.get("rationale"),
-                "people_involved": d.get("people_involved", []),
-                "alternatives_considered": d.get("alternatives_considered", []),
-                "confidence": 0.8,
-            })
-        return results
+        # Strip markdown code blocks if LLM adds them despite instructions
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+
+        parsed = json.loads(raw)
+        return DecisionSchema(**parsed)
 
     except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse failed for doc {doc_id}: {e}")
-        return []
+        logger.warning(f"LLM returned invalid JSON: {e}")
+        return None
     except Exception as e:
-        logger.error(f"LLM call failed for doc {doc_id}: {e}")
-        return []
+        logger.error(f"Decision extraction failed: {e}")
+        return None
 
 
-def insert_decisions(conn, decisions: list[dict]) -> int:
-    """Batch inserts decisions. Returns count inserted."""
-    if not decisions:
-        return 0
+# ── Database insertion ────────────────────────────────────────────
 
+def insert_decision(conn, doc_id: int, decision: DecisionSchema) -> Optional[int]:
+    """Inserts a validated decision into the decisions table."""
     cursor = conn.cursor()
-    inserted = 0
+    try:
+        cursor.execute("""
+            INSERT INTO decisions
+                (doc_id, decision_text, rationale, people_involved,
+                 alternatives_considered, confidence)
+            VALUES
+                (%s, %s, %s, %s, %s, %s)
+            RETURNING id;
+        """, (
+            doc_id,
+            decision.decision_text,
+            decision.rationale,
+            decision.people_involved,
+            decision.alternatives_considered,
+            decision.confidence,
+        ))
+        result = cursor.fetchone()
+        conn.commit()
+        return result[0] if result else None
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Decision insert failed for doc {doc_id}: {e}")
+        return None
+    finally:
+        cursor.close()
 
-    for d in decisions:
-        try:
-            cursor.execute("""
-                INSERT INTO decisions
-                    (doc_id, decision_text, rationale, people_involved,
-                     alternatives_considered, confidence)
-                VALUES
-                    (%(doc_id)s, %(decision_text)s, %(rationale)s,
-                     %(people_involved)s, %(alternatives_considered)s, %(confidence)s);
-            """, d)
-            inserted += 1
-        except Exception as e:
-            logger.error(f"Decision insert failed: {e}")
-            conn.rollback()
-            continue
 
-    conn.commit()
-    cursor.close()
-    return inserted
+# ── Main extraction loop ─────────────────────────────────────────
 
-
-def run_decision_extraction(batch_size: int = 20):
+def run_decision_extraction(batch_size: int = 50):
     """
-    Processes documents that haven't had decision extraction yet.
-    Only runs on Jira issues (richer text = more decisions).
-    Skips documents under 100 chars — not enough content for decisions.
+    Processes all documents that haven't had decision extraction yet.
+    Only ~30% of documents will contain real decisions — that's expected.
     """
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Add a flag column to track which docs have been processed
+    # Add tracking column if not exists
     cursor.execute("""
         ALTER TABLE raw_documents
-        ADD COLUMN IF NOT EXISTS decisions_extracted BOOLEAN DEFAULT FALSE;
+        ADD COLUMN IF NOT EXISTS decision_extracted BOOLEAN DEFAULT FALSE;
     """)
     conn.commit()
 
-    # Focus on Jira — commits are too short for reliable decision extraction
+    # Fetch unprocessed docs — prioritize Jira issues (more likely to have decisions)
     cursor.execute("""
-        SELECT id, content FROM raw_documents
-        WHERE decisions_extracted = FALSE
-        AND source = 'jira'
+        SELECT id, content, source FROM raw_documents
+        WHERE decision_extracted = FALSE
         AND content IS NOT NULL
-        AND LENGTH(content) > 100
-        ORDER BY id
+        AND LENGTH(content) > 50
+        ORDER BY
+            CASE WHEN source = 'jira' THEN 0 ELSE 1 END,
+            id
         LIMIT %s;
     """, (batch_size,))
 
@@ -158,53 +211,71 @@ def run_decision_extraction(batch_size: int = 20):
     cursor.close()
 
     if not docs:
-        logger.info("No unprocessed Jira documents found")
+        logger.info("No unprocessed documents found")
         conn.close()
         return {"processed": 0, "decisions_found": 0}
 
     total_processed = 0
     total_decisions = 0
+    total_cost_estimate = 0.0
 
     logger.info(f"Processing {len(docs)} documents for decision extraction...")
 
-    for doc_id, content in docs:
-        decisions = extract_decisions_llm(content, doc_id)
-        count = insert_decisions(conn, decisions)
-        total_decisions += count
+    for doc_id, content, source in docs:
+        decision = extract_decision_from_text(content)
 
-        # Mark as processed regardless of whether decisions were found
+        if decision and decision.contains_decision and decision.confidence >= 0.6:
+            result = insert_decision(conn, doc_id, decision)
+            if result:
+                total_decisions += 1
+                logger.debug(f"  Decision found in doc {doc_id}: {decision.decision_text[:80]}")
+
+        # Mark as processed regardless of whether a decision was found
         cur2 = conn.cursor()
         cur2.execute(
-            "UPDATE raw_documents SET decisions_extracted = TRUE WHERE id = %s",
+            "UPDATE raw_documents SET decision_extracted = TRUE WHERE id = %s",
             (doc_id,)
         )
         conn.commit()
         cur2.close()
 
         total_processed += 1
+        total_cost_estimate += 0.0005  # rough cost estimate per doc
 
-        if decisions:
-            logger.info(f"  Doc {doc_id}: {count} decision(s) found")
+        if total_processed % 10 == 0:
+            logger.info(
+                f"  Progress: {total_processed}/{len(docs)} | "
+                f"Decisions: {total_decisions} | "
+                f"Est. cost: ${total_cost_estimate:.3f}"
+            )
 
-        # Rate limit: ~3 req/sec to stay inside OpenAI free tier limits
-        time.sleep(0.4)
+        # Rate limiting — Gemini free tier allows 15 req/min
+        time.sleep(4)
 
     conn.close()
-    logger.info(f"Done: {total_processed} docs | {total_decisions} decisions extracted")
-    return {"processed": total_processed, "decisions_found": total_decisions}
+    logger.info(
+        f"Done: {total_processed} docs | "
+        f"{total_decisions} decisions extracted | "
+        f"Est. cost: ${total_cost_estimate:.3f}"
+    )
+
+    return {
+        "processed": total_processed,
+        "decisions_found": total_decisions,
+        "estimated_cost_usd": round(total_cost_estimate, 3),
+    }
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s | %(levelname)s | %(message)s")
-
-    if not os.getenv("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY not set in .env — add it and re-run")
-        exit(1)
+    import json
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
 
     total = {"processed": 0, "decisions_found": 0}
     while True:
-        result = run_decision_extraction(batch_size=20)
+        result = run_decision_extraction(batch_size=50)
         total["processed"] += result["processed"]
         total["decisions_found"] += result["decisions_found"]
         if result["processed"] == 0:

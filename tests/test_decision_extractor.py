@@ -5,78 +5,112 @@ The LLM call is mocked — no API key needed to run these tests.
 """
 
 from unittest.mock import patch, MagicMock
-from src.extraction.decision_extractor import extract_decisions_llm, insert_decisions
+from src.extraction.decision_extractor import (
+    extract_decision_from_text,
+    DecisionSchema
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def make_mock_response(decisions: list) -> MagicMock:
-    """Builds a fake OpenAI response object."""
-    import json
+def make_mock_response(json_str: str) -> MagicMock:
+    """Builds a fake Gemini response object."""
     mock_response = MagicMock()
-    mock_response.choices[0].message.content = json.dumps({"decisions": decisions})
+    mock_response.text = json_str
     return mock_response
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 @patch("src.extraction.decision_extractor.client")
-def test_extracts_decision_from_text(mock_client):
+def test_extracts_clear_decision(mock_client):
     """Should parse a valid decision out of LLM response."""
-    mock_client.chat.completions.create.return_value = make_mock_response([
-        {
-            "decision_text": "Replace ZooKeeper with KRaft for metadata management",
-            "rationale": "Remove external dependency and simplify operations",
-            "people_involved": ["Jun Rao"],
-            "alternatives_considered": ["Keep ZooKeeper", "Use etcd"],
-        }
-    ])
+    mock_client.models.generate_content.return_value = make_mock_response('''{
+        "contains_decision": true,
+        "decision_text": "Replace ZooKeeper with KRaft for metadata management",
+        "rationale": "ZooKeeper added operational complexity and limited scalability",
+        "people_involved": ["Jun Rao", "Jason Gustafson"],
+        "alternatives_considered": ["Keeping ZooKeeper", "Using etcd"],
+        "confidence": 0.92
+    }''')
 
-    results = extract_decisions_llm("We decided to use KRaft...", doc_id=1)
-
-    assert len(results) == 1
-    assert results[0]["doc_id"] == 1
-    assert "KRaft" in results[0]["decision_text"]
-    assert results[0]["rationale"] is not None
-    assert "Jun Rao" in results[0]["people_involved"]
+    text = """
+    After discussion, the team decided to replace ZooKeeper with KRaft
+    for metadata management. The main reason was that ZooKeeper added
+    operational complexity. Jun Rao proposed this change. We considered
+    keeping ZooKeeper or switching to etcd but rejected both.
+    """
+    result = extract_decision_from_text(text)
+    assert result is not None
+    assert result.contains_decision is True
+    assert result.decision_text is not None
+    assert "KRaft" in result.decision_text
+    assert result.confidence > 0.5
+    assert "Jun Rao" in result.people_involved
 
 
 @patch("src.extraction.decision_extractor.client")
-def test_returns_empty_when_no_decisions(mock_client):
-    """Should return empty list when LLM finds no decisions."""
-    mock_client.chat.completions.create.return_value = make_mock_response([])
+def test_returns_no_decision_for_bug_report(mock_client):
+    """Bug reports without resolution should not be flagged as decisions."""
+    mock_client.models.generate_content.return_value = make_mock_response('''{
+        "contains_decision": false,
+        "decision_text": null,
+        "rationale": null,
+        "people_involved": [],
+        "alternatives_considered": [],
+        "confidence": 0.1
+    }''')
 
-    results = extract_decisions_llm("Fixed a typo in the README.", doc_id=2)
-    assert results == []
+    text = """
+    NullPointerException when consumer group rebalances.
+    Stack trace: java.lang.NullPointerException at KafkaConsumer.java:847
+    Steps to reproduce: start consumer, send messages, rebalance.
+    """
+    result = extract_decision_from_text(text)
+    assert result is not None
+    assert result.contains_decision is False
+    assert result.confidence < 0.6
 
 
 @patch("src.extraction.decision_extractor.client")
 def test_handles_llm_error_gracefully(mock_client):
-    """Should return empty list on API failure, not crash."""
-    mock_client.chat.completions.create.side_effect = Exception("API timeout")
+    """Should return None on API failure, not crash."""
+    mock_client.models.generate_content.side_effect = Exception("API timeout")
 
-    results = extract_decisions_llm("Some content", doc_id=3)
-    assert results == []
+    result = extract_decision_from_text("Some content")
+    assert result is None
+
+
+def test_handles_empty_text():
+    """Should return None for empty text without calling the API."""
+    result = extract_decision_from_text("")
+    assert result is None
 
 
 @patch("src.extraction.decision_extractor.client")
-def test_multiple_decisions_in_one_doc(mock_client):
-    """Should handle documents containing multiple decisions."""
-    mock_client.chat.completions.create.return_value = make_mock_response([
-        {
-            "decision_text": "Use async replication for higher throughput",
-            "rationale": "Latency requirements outweigh durability needs",
-            "people_involved": [],
-            "alternatives_considered": ["Sync replication"],
-        },
-        {
-            "decision_text": "Set default partition count to 3",
-            "rationale": "Balance between parallelism and overhead",
-            "people_involved": ["Neha Narkhede"],
-            "alternatives_considered": ["1 partition", "6 partitions"],
-        },
-    ])
+def test_handles_invalid_json(mock_client):
+    """Should return None when LLM returns invalid JSON."""
+    mock_client.models.generate_content.return_value = make_mock_response(
+        "This is not valid JSON at all"
+    )
 
-    results = extract_decisions_llm("Long Jira discussion...", doc_id=4)
-    assert len(results) == 2
-    assert all(r["doc_id"] == 4 for r in results)
+    result = extract_decision_from_text("Some content about a decision")
+    assert result is None
+
+
+@patch("src.extraction.decision_extractor.client")
+def test_pydantic_validation(mock_client):
+    """Verify Pydantic validates the schema correctly."""
+    mock_client.models.generate_content.return_value = make_mock_response('''{
+        "contains_decision": true,
+        "decision_text": "Use async replication for higher throughput",
+        "rationale": "Latency requirements outweigh durability needs",
+        "people_involved": [],
+        "alternatives_considered": ["Sync replication"],
+        "confidence": 0.85
+    }''')
+
+    result = extract_decision_from_text("Long Jira discussion...")
+    assert isinstance(result, DecisionSchema)
+    assert result.confidence == 0.85
+    assert result.alternatives_considered == ["Sync replication"]
