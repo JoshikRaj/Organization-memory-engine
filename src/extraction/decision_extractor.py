@@ -107,9 +107,9 @@ def extract_decision_from_text(text: str) -> Optional[DecisionSchema]:
     Uses Google Gemini (free tier: 15 RPM, 1M tokens/day) instead of
     OpenAI to avoid API costs during development.
     """
-    # Truncate to ~2000 tokens to save cost
+    # Truncate to ~1500 tokens to save cost
     # Most decisions are captured in the first part of the text anyway
-    text = text[:6000]
+    text = text[:3000]
 
     if not text.strip():
         return None
@@ -201,9 +201,8 @@ def run_decision_extraction(batch_size: int = 50):
         WHERE decision_extracted = FALSE
         AND content IS NOT NULL
         AND LENGTH(content) > 50
-        ORDER BY
-            CASE WHEN source = 'jira' THEN 0 ELSE 1 END,
-            id
+        AND source = 'kip'
+        ORDER BY id
         LIMIT %s;
     """, (batch_size,))
 
