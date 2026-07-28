@@ -77,16 +77,31 @@ def generate_answer(
         question=question,
     )
 
-    try:
-        client = get_client()
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[prompt],
-        )
-        return response.text.strip()
+    # Retry with exponential backoff for Gemini free-tier rate limits (429s)
+    max_retries = 3
+    base_delay = 10  # seconds
 
-    except Exception as e:
-        logger.warning(f"LLM generation failed ({e.__class__.__name__}) -- using combined context fallback")
+    for attempt in range(max_retries):
+        try:
+            client = get_client()
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[prompt],
+            )
+            return response.text.strip()
+
+        except Exception as e:
+            is_rate_limit = "429" in str(e) or "Too Many Requests" in str(e)
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # 10s, 20s, 40s
+                logger.warning(
+                    f"Rate limited (attempt {attempt + 1}/{max_retries}) "
+                    f"-- retrying in {delay}s"
+                )
+                time.sleep(delay)
+                continue
+            else:
+                logger.warning(f"LLM generation failed ({e.__class__.__name__}) -- using combined context fallback")
         # Smarter fallback: combine semantic content + graph expert/KIP context
         # This ensures expert names and KIP rationale are still included in the answer
         fallback_parts = []

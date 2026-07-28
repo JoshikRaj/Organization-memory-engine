@@ -1,4 +1,4 @@
-﻿"""
+"""
 evaluation/rag_scorer.py
 
 Week 4 scorer -- uses full RAG pipeline (semantic + graph + LLM generation).
@@ -74,8 +74,8 @@ def run_rag_eval(similarity_threshold: float = 0.5):
                 f"  Progress: {len(results)}/{total} | Correct: {correct}"
             )
 
-        # Respect Gemini free-tier rate limit (15 RPM = 4s between calls)
-        time.sleep(4)
+        # Respect Gemini free-tier rate limit (15 RPM — use 8s to avoid bursts)
+        time.sleep(8)
 
     # Save results
     conn = get_connection()
