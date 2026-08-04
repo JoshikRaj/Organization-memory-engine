@@ -9,7 +9,7 @@ Full RAG pipeline:
   3. Context merge    -> combines both into one context block
   4. LLM generation  -> generates sourced answer from merged context
 
-Uses Gemini (google-genai) instead of OpenAI -- same API key already in .env.
+Uses Groq (Llama 3.3 70B) for fast, free LLM generation.
 Falls back to best semantic hit if LLM fails.
 """
 
@@ -19,20 +19,20 @@ import time
 from typing import Optional
 
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
 
 from src.retrieval.semantic_retriever import hybrid_search
 from src.retrieval.graph_retriever import graph_retrieve, format_graph_context
 
-load_dotenv()
+load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
-_client: Optional[genai.Client] = None
+_client: Optional[Groq] = None
 
-def get_client() -> genai.Client:
+def get_client() -> Groq:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _client
 
 
@@ -77,23 +77,25 @@ def generate_answer(
         question=question,
     )
 
-    # Retry with exponential backoff for Gemini free-tier rate limits (429s)
+    # Retry with exponential backoff for rate limits
     max_retries = 3
-    base_delay = 10  # seconds
+    base_delay = 5  # seconds
 
     for attempt in range(max_retries):
         try:
             client = get_client()
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[prompt],
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300,
             )
-            return response.text.strip()
+            return response.choices[0].message.content.strip()
 
         except Exception as e:
-            is_rate_limit = "429" in str(e) or "Too Many Requests" in str(e)
+            is_rate_limit = "429" in str(e) or "rate" in str(e).lower()
             if is_rate_limit and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)  # 10s, 20s, 40s
+                delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 logger.warning(
                     f"Rate limited (attempt {attempt + 1}/{max_retries}) "
                     f"-- retrying in {delay}s"

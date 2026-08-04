@@ -74,8 +74,8 @@ def run_rag_eval(similarity_threshold: float = 0.5):
                 f"  Progress: {len(results)}/{total} | Correct: {correct}"
             )
 
-        # Respect Gemini free-tier rate limit (15 RPM — use 8s to avoid bursts)
-        time.sleep(8)
+        # Respect Groq free-tier rate limit (30 RPM — use 3s spacing)
+        time.sleep(3)
 
     # Save results
     conn = get_connection()
