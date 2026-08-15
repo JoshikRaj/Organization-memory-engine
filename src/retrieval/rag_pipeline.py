@@ -89,6 +89,7 @@ def generate_answer(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=300,
+                timeout=10,
             )
             return response.choices[0].message.content.strip()
 

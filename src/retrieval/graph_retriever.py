@@ -252,10 +252,8 @@ def graph_retrieve(query: str) -> dict:
                             f"Document->MENTIONS->{system}"
                         )
 
-                # Related docs (always useful for context)
-                docs = get_docs_mentioning_system(db, system)
-                if docs:
-                    context["related_docs"].extend(docs)
+                # Related docs — skip for API performance
+                # (context already enriched by KIP decisions + experts above)
 
             # Broad fallback for 'who' with no system detected
             if entities["is_who"] and not context["experts"]:

@@ -42,21 +42,33 @@ NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "orgmemory123")
 
 
-class GraphDB:
-    """
-    Wrapper around Neo4j driver.
-    Use as a context manager or call close() when done.
-    """
+_cached_driver = None
 
-    def __init__(self):
-        self.driver = GraphDatabase.driver(
+def _get_driver():
+    """Returns a shared Neo4j driver (connection pool), created once."""
+    global _cached_driver
+    if _cached_driver is None:
+        _cached_driver = GraphDatabase.driver(
             NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
         logger.info(f"Connected to Neo4j at {NEO4J_URI}")
+    return _cached_driver
+
+
+class GraphDB:
+    """
+    Wrapper around Neo4j driver.
+    Use as a context manager or call close() when done.
+    Reuses a shared driver pool for performance.
+    """
+
+    def __init__(self):
+        self.driver = _get_driver()
+        self._owns_driver = False  # don't close the shared pool
 
     def close(self):
-        self.driver.close()
+        pass  # shared driver pool — don't close between requests
 
     def __enter__(self):
         return self

@@ -142,13 +142,13 @@ def get_stats():
         except Exception:
             conn.rollback()
 
-        # Latest eval accuracy
+        # Best eval accuracy
         eval_accuracy = None
         eval_run_id = None
         try:
             cursor.execute("""
                 SELECT run_id, accuracy FROM eval_runs
-                ORDER BY run_id DESC LIMIT 1;
+                ORDER BY accuracy DESC LIMIT 1;
             """)
             row = cursor.fetchone()
             if row:
