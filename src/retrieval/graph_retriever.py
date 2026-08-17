@@ -18,6 +18,7 @@ Actual graph schema (verified 2026-07-18):
 """
 
 import logging
+from functools import lru_cache
 from src.storage.graph_db import GraphDB
 
 logger = logging.getLogger(__name__)
@@ -125,14 +126,14 @@ def get_kip_context_for_topic(db: GraphDB, term: str) -> list[dict]:
     results = db.run("""
         MATCH (doc:Document)
         WHERE doc.source = 'kip'
-          AND toLower(doc.preview) CONTAINS toLower($term)
+          AND toLower(doc.preview) CONTAINS $term
         RETURN doc.source_id  AS source_id,
                doc.preview    AS preview,
                doc.author     AS author,
                doc.timestamp  AS timestamp
         ORDER BY doc.timestamp DESC
         LIMIT 4
-    """, {"term": term})
+    """, {"term": term.lower()})
     return results
 
 
@@ -143,7 +144,7 @@ def get_experts_for_topic(db: GraphDB, topic: str) -> list[dict]:
     """
     results = db.run("""
         MATCH (p:Person)-[r:EXPERTISE_IN]->(t:Topic)
-        WHERE toLower(t.name) CONTAINS toLower($topic)
+        WHERE toLower(t.name) CONTAINS $topic
         RETURN p.name          AS person,
                t.name          AS topic,
                r.score         AS score,
@@ -151,7 +152,7 @@ def get_experts_for_topic(db: GraphDB, topic: str) -> list[dict]:
                r.mention_count  AS mentions
         ORDER BY r.score DESC
         LIMIT 8
-    """, {"topic": topic})
+    """, {"topic": topic.lower()})
     # Filter out non-person entries
     return [r for r in results if _is_valid_person(r.get("person", ""))][:5]
 
@@ -163,14 +164,14 @@ def get_authors_for_system(db: GraphDB, system_name: str) -> list[dict]:
     """
     results = db.run("""
         MATCH (doc:Document)-[:MENTIONS]->(s:System)
-        WHERE toLower(s.name) CONTAINS toLower($system)
+        WHERE toLower(s.name) CONTAINS $system
           AND doc.author IS NOT NULL
         RETURN doc.author          AS person,
                s.name              AS topic,
                count(doc)          AS mentions
         ORDER BY mentions DESC
         LIMIT 8
-    """, {"system": system_name})
+    """, {"system": system_name.lower()})
     return [
         {
             "person": r.get("person", ""),
@@ -202,12 +203,26 @@ def get_docs_mentioning_system(db: GraphDB, system_name: str) -> list[dict]:
     return results
 
 
+# In-memory cache for graph results — dataset is small and static
+_graph_cache = {}
+
 def graph_retrieve(query: str) -> dict:
     """
     Main entry point. Detects intent, runs appropriate graph traversals,
     returns structured context for the LLM answer generation step.
+    Results are cached in memory since the graph data doesn't change at runtime.
     """
+    # Check cache first
+    cache_key = query.strip().lower()
+    if cache_key in _graph_cache:
+        logger.info(f"Graph retrieval: cache hit for '{query[:50]}'")
+        return _graph_cache[cache_key]
+
     entities = extract_entities_from_query(query)
+    # Lowercase all detected systems before graph queries (matches index)
+    entities["systems"] = [s.lower() for s in entities["systems"]]
+    entities["aliased_terms"] = [t.lower() for t in entities["aliased_terms"]]
+    entities["fallback_terms"] = [t.lower() for t in entities["fallback_terms"]]
     context = {
         "decisions": [],      # KIP document previews used as decision context
         "experts": [],
@@ -304,6 +319,8 @@ def graph_retrieve(query: str) -> dict:
         f"Graph retrieval: {len(context['decisions'])} KIP-decisions, "
         f"{len(context['experts'])} experts | paths: {context['graph_paths_used']}"
     )
+    # Cache the result for future identical queries
+    _graph_cache[cache_key] = context
     return context
 
 
