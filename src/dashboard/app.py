@@ -216,7 +216,7 @@ if page == "💬 Ask":
                     "semantic": ("#455a64", "#eceff1"),
                 }
                 for src in sources:
-                    stype = src.get("source", src.get("type", "unknown"))
+                    stype = src.get("source") or src.get("type") or "unknown"
                     fg, bg = COLOR.get(stype, ("#555", "#f5f5f5"))
                     sim = src.get("similarity") or 0
                     preview = src.get("preview") or src.get("decision") or ""
