@@ -93,6 +93,24 @@ def query_api(question: str) -> dict:
         return {"error": str(e)}
 
 
+@st.cache_data(ttl=60)
+def get_experts(topic: str) -> list:
+    try:
+        r = requests.get(f"{API_BASE}/experts/{topic}", timeout=10)
+        return r.json().get("experts", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60)
+def get_decisions(system: str) -> list:
+    try:
+        r = requests.get(f"{API_BASE}/decisions/{system}", timeout=10)
+        return r.json().get("decisions", [])
+    except Exception:
+        return []
+
+
 # ── Sidebar ──────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -110,7 +128,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["💬 Ask", "📊 Benchmark"],
+        ["💬 Ask", "👤 Experts", "📋 Decisions", "📊 Benchmark"],
         label_visibility="collapsed",
     )
 
@@ -124,8 +142,7 @@ with st.sidebar:
             st.metric("Docs", f"{stats.get('total_documents', 0):,}")
             st.metric("Experts", f"{stats.get('total_experts', 0):,}")
         with col2:
-            by_source = stats.get("by_source", {})
-            st.metric("KIPs", by_source.get("kip", 0))
+            st.metric("Decisions", f"{stats.get('total_decisions', 0):,}")
             st.metric("Entities", f"{stats.get('total_entities', 0):,}")
 
         acc = stats.get("eval_accuracy", 0)
@@ -162,52 +179,57 @@ if page == "💬 Ask":
 
     st.markdown("**Example questions — click to ask:**")
     cols = st.columns(3)
-    clicked = None
     for i, ex in enumerate(EXAMPLES):
         if cols[i % 3].button(ex, key=f"ex{i}", use_container_width=True):
-            clicked = ex
+            st.session_state["question"] = ex
+            st.session_state["auto_ask"] = True
+            st.rerun()
 
     st.divider()
 
     question = st.text_input(
         "Your question",
-        value=clicked or st.session_state.get("last_q", ""),
+        value=st.session_state.get("question", ""),
         placeholder="Ask about any Kafka engineering decision...",
         label_visibility="collapsed",
+        key="q_input",
     )
 
     ask_btn = st.button("Ask", type="primary", use_container_width=True)
 
-    if ask_btn and question:
-        st.session_state["last_q"] = question
+    # Fire query on button click OR on auto_ask from example buttons
+    should_ask = (ask_btn and question) or st.session_state.pop("auto_ask", False)
+    active_question = question or st.session_state.get("question", "")
+
+    if should_ask and active_question:
+        st.session_state["question"] = active_question
 
         with st.spinner("Searching knowledge graph and documents..."):
             t0 = time.time()
-            result = query_api(question)
+            result = query_api(active_question)
             wall_ms = int((time.time() - t0) * 1000)
 
         if "error" in result:
             st.error(f"API error: {result['error']}")
-            st.stop()
 
-        # ── Answer ──
+        # ── Answer ——
         st.markdown("### Answer")
         st.markdown(
             f"<div class='answer-box'>{result.get('answer', 'No answer generated.')}</div>",
             unsafe_allow_html=True,
         )
 
-        # ── Metrics row ──
+        # —— Metrics row ——
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Latency", f"{result.get('latency_ms', wall_ms)}ms")
         m2.metric("Sources", len(result.get("sources", [])))
         m3.metric("Graph paths", len(result.get("graph_paths", [])))
         m4.metric("Experts found", len(result.get("experts", [])))
 
-        # ── Sources ──
+        # —— Sources ——
         sources = result.get("sources", [])
         if sources:
-            with st.expander(f"📄 Sources ({len(sources)})", expanded=True):
+            with st.expander(f"📄 Sources ({len(sources)})"):
                 COLOR = {
                     "kip": ("#1976d2", "#e3f2fd"),
                     "jira": ("#e65100", "#fff3e0"),
@@ -231,23 +253,148 @@ if page == "💬 Ask":
                     )
                     st.markdown("---")
 
-        # ── Graph paths ──
+        # —— Graph paths ——
         graph_paths = result.get("graph_paths", [])
         if graph_paths:
             with st.expander(f"🔗 Knowledge graph paths ({len(graph_paths)})"):
                 for path in graph_paths:
                     st.code(path, language=None)
 
-        # ── Experts ──
+        # —— Experts ——
         experts = result.get("experts", [])
         if experts:
-            with st.expander(f"👤 Domain experts ({len(experts)})", expanded=True):
+            with st.expander(f"👤 Domain experts ({len(experts)})"):
                 df = pd.DataFrame(experts)
                 cols_show = [c for c in
                              ["person", "topic", "score", "decisions", "mentions"]
                              if c in df.columns]
                 st.dataframe(df[cols_show], use_container_width=True,
                              hide_index=True)
+
+
+# ── Page: Experts ────────────────────────────────────────────────
+
+elif page == "👤 Experts":
+    st.markdown("## Domain experts")
+    st.markdown("Who knows the most about each Kafka component, scored by decisions + mentions + recency.")
+
+    TOPIC_BUTTONS = [
+        "zookeeper", "replication", "kafka streams",
+        "tiered storage", "consumer group", "exactly once",
+        "transactions", "mirrormaker",
+    ]
+
+    st.markdown("**Popular topics:**")
+    tcols = st.columns(4)
+    clicked_topic = None
+    for i, t in enumerate(TOPIC_BUTTONS):
+        if tcols[i % 4].button(t, key=f"t{i}", use_container_width=True):
+            clicked_topic = t
+
+    topic = st.text_input(
+        "Or type a topic",
+        value=clicked_topic or "",
+        placeholder="e.g. replication, security, streams...",
+        label_visibility="collapsed",
+    )
+
+    if topic:
+        with st.spinner(f"Finding experts on '{topic}'..."):
+            experts = get_experts(topic)
+
+        if not experts:
+            st.info(f"No experts found for '{topic}'. Try: zookeeper, replication, tiered storage")
+        else:
+            st.success(f"Found {len(experts)} experts on '{topic}'")
+            df = pd.DataFrame(experts)
+
+            fig = px.bar(
+                df,
+                x="person",
+                y="score",
+                color="score",
+                color_continuous_scale="Blues",
+                text=[f"{s:.2f}" for s in df["score"]],
+                title=f"Expertise scores — '{topic}'",
+                labels={"person": "Contributor", "score": "Score"},
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(
+                showlegend=False,
+                yaxis_range=[0, 1.15],
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis_tickangle=-25,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            cols_show = [c for c in
+                         ["person", "topic", "score", "decisions", "mentions"]
+                         if c in df.columns]
+            st.dataframe(
+                df[cols_show].rename(columns={
+                    "person": "Contributor",
+                    "topic": "Topic",
+                    "score": "Score",
+                    "decisions": "Decisions",
+                    "mentions": "Mentions",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+# ── Page: Decisions ──────────────────────────────────────────────
+
+elif page == "📋 Decisions":
+    st.markdown("## Engineering decisions")
+    st.markdown(
+        "Structured decisions extracted from Jira, Git, and KIP documents — "
+        "what was decided, why, and what alternatives were rejected."
+    )
+
+    SYS_BUTTONS = [
+        "zookeeper", "kraft", "replication",
+        "tiered storage", "transactions", "consumer",
+    ]
+
+    st.markdown("**Popular systems:**")
+    scols = st.columns(3)
+    clicked_sys = None
+    for i, s in enumerate(SYS_BUTTONS):
+        if scols[i % 3].button(s, key=f"s{i}", use_container_width=True):
+            clicked_sys = s
+
+    system = st.text_input(
+        "Or type a system",
+        value=clicked_sys or "",
+        placeholder="e.g. zookeeper, kraft, replication...",
+        label_visibility="collapsed",
+    )
+
+    if system:
+        with st.spinner(f"Finding decisions about '{system}'..."):
+            decisions = get_decisions(system)
+
+        if not decisions:
+            st.info(f"No decisions found for '{system}'. Try: zookeeper, kraft, replication")
+        else:
+            st.success(f"Found {len(decisions)} decisions about '{system}'")
+
+            for i, dec in enumerate(decisions):
+                label = dec.get("decision", "")[:80] or f"Decision {i+1}"
+                with st.expander(f"#{i+1} — {label}...", expanded=(i == 0)):
+                    if dec.get("decision"):
+                        st.markdown(f"**What was decided:**  \n{dec['decision']}")
+                    if dec.get("rationale"):
+                        st.markdown(f"**Why:**  \n{dec['rationale']}")
+                    alts = dec.get("alternatives") or []
+                    if alts:
+                        st.markdown("**Alternatives considered:**")
+                        for alt in alts:
+                            st.markdown(f"- {alt}")
+                    conf = float(dec.get("confidence", 0))
+                    st.progress(conf, text=f"Extraction confidence: {conf:.0%}")
 
 
 # ── Page: Benchmark ──────────────────────────────────────────────
