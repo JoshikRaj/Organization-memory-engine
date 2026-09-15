@@ -36,9 +36,15 @@ def get_client() -> Groq:
     return _client
 
 
-ANSWER_PROMPT = """You are an expert on Apache Kafka with access to engineering discussions, KIP documents, and contributor history.
+ANSWER_PROMPT = """You are an expert on Apache Kafka engineering history.
 
-Answer the question using ONLY the context provided below. Be specific. Include names, technical terms, and reasons where available. Keep your answer under 150 words.
+Answer the question using the context below.
+IMPORTANT RULES:
+- Lead with the architectural reason, not a bug report or incident
+- If KIP documents are in the context, prioritize them as the authoritative source
+- Be specific — include the KIP number, the people involved, and alternatives rejected
+- Keep the answer under 150 words
+- Never start with a bug report or migration issue — those are symptoms, not decisions
 
 SEMANTIC CONTEXT (from document search):
 {semantic_context}
@@ -85,11 +91,11 @@ def generate_answer(
         try:
             client = get_client()
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=300,
-                timeout=10,
+                timeout=30,
             )
             return response.choices[0].message.content.strip()
 

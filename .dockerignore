@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Virtual environment — never copy into image
+venv/
+env/
+.env.local
+
+# Dev/test files
+tests/
+*.log
+logs/
+
+# Large data files — re-ingested at runtime
+data/
+
+# Temp scripts
+reset_decisions.py
+test_groq.py
+test.py
+
+# Docker itself
+Dockerfile
+docker-compose.yml

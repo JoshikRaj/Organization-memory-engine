@@ -20,7 +20,7 @@ import time
 from typing import Optional
 
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
 from pydantic import BaseModel, Field
 
 from src.storage.database import get_connection
@@ -28,7 +28,7 @@ from src.storage.database import get_connection
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
 # ── Pydantic schema ──────────────────────────────────────────────
@@ -55,7 +55,7 @@ class DecisionSchema(BaseModel):
         default_factory=list,
         description="Other options that were considered but rejected"
     )
-    confidence: float = Field(
+    confidence: Optional[float] = Field(
         default=0.0,
         description="Your confidence this is a real decision, 0.0 to 1.0"
     )
@@ -101,11 +101,10 @@ If no decision is present, set contains_decision to false and all other fields t
 
 def extract_decision_from_text(text: str) -> Optional[DecisionSchema]:
     """
-    Calls Gemini Flash to extract a decision from text.
+    Calls Groq (Llama 3.3 70B) to extract a decision from text.
     Returns a validated DecisionSchema or None if extraction fails.
 
-    Uses Google Gemini (free tier: 15 RPM, 1M tokens/day) instead of
-    OpenAI to avoid API costs during development.
+    Uses Groq free tier — same API key already used in the rest of the project.
     """
     # Truncate to ~1500 tokens to save cost
     # Most decisions are captured in the first part of the text anyway
@@ -115,19 +114,23 @@ def extract_decision_from_text(text: str) -> Optional[DecisionSchema]:
         return None
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[
-                DECISION_EXTRACTION_PROMPT.format(text=text)
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You extract structured data from text. Always respond with valid JSON only."
+                },
+                {
+                    "role": "user",
+                    "content": DECISION_EXTRACTION_PROMPT.format(text=text)
+                }
             ],
-            config={
-                "system_instruction": "You extract structured data from text. Always respond with valid JSON only.",
-                "temperature": 0.1,
-                "max_output_tokens": 500,
-            },
+            temperature=0.1,
+            max_tokens=500,
         )
 
-        raw = response.text.strip()
+        raw = response.choices[0].message.content.strip()
 
         # Strip markdown code blocks if LLM adds them despite instructions
         if raw.startswith("```"):
@@ -223,7 +226,7 @@ def run_decision_extraction(batch_size: int = 50):
     for doc_id, content, source in docs:
         decision = extract_decision_from_text(content)
 
-        if decision and decision.contains_decision and decision.confidence >= 0.6:
+        if decision and decision.contains_decision and (decision.confidence or 0.0) >= 0.6:
             result = insert_decision(conn, doc_id, decision)
             if result:
                 total_decisions += 1
@@ -248,8 +251,8 @@ def run_decision_extraction(batch_size: int = 50):
                 f"Est. cost: ${total_cost_estimate:.3f}"
             )
 
-        # Rate limiting — Gemini free tier allows 15 req/min
-        time.sleep(4)
+        # Rate limiting — gpt-oss-120b plan: slow down to avoid 429
+        time.sleep(3)
 
     conn.close()
     logger.info(

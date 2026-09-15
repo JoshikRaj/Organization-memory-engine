@@ -148,7 +148,9 @@ def hybrid_search(
     if boost_kip:
         for r in candidates:
             if r["source"] == "kip":
-                r["similarity"] = min(1.0, r["similarity"] * 1.10)
+                # KIPs contain structured rationale — boost aggressively so they
+                # always lead over Jira bug reports on architectural questions
+                r["similarity"] = min(1.0, r["similarity"] * 1.35)
 
     # Re-rank after boost and return top_k
     candidates.sort(key=lambda x: x["similarity"], reverse=True)
