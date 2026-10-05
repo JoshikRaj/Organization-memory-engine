@@ -1,10 +1,12 @@
 """
 api/routes.py
 
-FastAPI router with three endpoints:
-  GET  /health  — service health check
-  GET  /stats   — data source statistics
-  POST /query   — ask a question, get a RAG-powered answer
+FastAPI router with five endpoints:
+  GET  /health           — service health check
+  GET  /stats            — data source statistics
+  POST /query            — ask a question, get a RAG-powered answer
+  GET  /experts/{topic}  — find domain experts for a topic
+  GET  /decisions/{system} — find engineering decisions for a system
 """
 
 import logging
@@ -66,8 +68,29 @@ class StatsResponse(BaseModel):
     by_source: dict
     total_entities: int
     total_experts: int
+    total_decisions: int = 0
     eval_accuracy: Optional[float] = None
     eval_run_id: Optional[str] = None
+
+
+class ExpertsResponse(BaseModel):
+    topic: str
+    experts: list[dict]
+    total: int
+
+
+class DecisionInfo(BaseModel):
+    decision: Optional[str] = None
+    rationale: Optional[str] = None
+    alternatives: list[str] = []
+    confidence: float = 0.0
+    people: list[str] = []
+
+
+class DecisionsResponse(BaseModel):
+    system: str
+    decisions: list[dict]
+    total: int
 
 
 # ── Endpoints ────────────────────────────────────────────────────
@@ -142,6 +165,14 @@ def get_stats():
         except Exception:
             conn.rollback()
 
+        # Total decisions
+        total_decisions = 0
+        try:
+            cursor.execute("SELECT COUNT(*) FROM decisions;")
+            total_decisions = cursor.fetchone()[0]
+        except Exception:
+            conn.rollback()
+
         # Best eval accuracy
         eval_accuracy = None
         eval_run_id = None
@@ -165,6 +196,7 @@ def get_stats():
             by_source=by_source,
             total_entities=total_entities,
             total_experts=total_experts,
+            total_decisions=total_decisions,
             eval_accuracy=eval_accuracy,
             eval_run_id=eval_run_id,
         )
@@ -195,3 +227,105 @@ def query_endpoint(req: QueryRequest):
     except Exception as e:
         logger.error(f"Query failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@router.get("/experts/{topic}", response_model=ExpertsResponse)
+def get_experts_for_topic(topic: str):
+    """
+    Find domain experts for a given topic.
+    Queries the experts table ranked by expertise_score.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                person_name,
+                topic,
+                expertise_score,
+                decision_count,
+                mention_count,
+                last_active
+            FROM experts
+            WHERE LOWER(topic) LIKE LOWER(%s)
+            ORDER BY expertise_score DESC
+            LIMIT 20;
+        """, (f"%{topic}%",))
+
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        experts = []
+        for row in rows:
+            experts.append({
+                "person": row[0],
+                "topic": row[1],
+                "score": round(float(row[2]), 4) if row[2] else 0.0,
+                "decisions": row[3] or 0,
+                "mentions": row[4] or 0,
+                "last_active": str(row[5]) if row[5] else "unknown",
+            })
+
+        return ExpertsResponse(
+            topic=topic,
+            experts=experts,
+            total=len(experts),
+        )
+
+    except Exception as e:
+        logger.error(f"Expert query failed for '{topic}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/decisions/{system}", response_model=DecisionsResponse)
+def get_decisions_for_system(system: str):
+    """
+    Find engineering decisions related to a system/component.
+    Queries the decisions table joined with raw_documents for context.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                d.decision_text,
+                d.rationale,
+                d.alternatives_considered,
+                d.confidence,
+                d.people_involved
+            FROM decisions d
+            JOIN raw_documents r ON d.doc_id = r.id
+            WHERE (LOWER(d.decision_text) LIKE LOWER(%s)
+                   OR LOWER(r.content) LIKE LOWER(%s)
+                   OR LOWER(COALESCE(d.rationale, '')) LIKE LOWER(%s))
+              AND d.confidence >= 0.6
+            ORDER BY d.confidence DESC
+            LIMIT 20;
+        """, (f"%{system}%", f"%{system}%", f"%{system}%"))
+
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        decisions = []
+        for row in rows:
+            decisions.append({
+                "decision": row[0] or "",
+                "rationale": row[1] or "",
+                "alternatives": row[2] if row[2] else [],
+                "confidence": round(float(row[3]), 2) if row[3] else 0.0,
+                "people": row[4] if row[4] else [],
+            })
+
+        return DecisionsResponse(
+            system=system,
+            decisions=decisions,
+            total=len(decisions),
+        )
+
+    except Exception as e:
+        logger.error(f"Decision query failed for '{system}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
