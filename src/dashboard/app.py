@@ -17,7 +17,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import os
-API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+API_BASE = os.environ.get("API_BASE", "http://localhost:8000").rstrip("/")
+DEMO_MODE = not bool(API_BASE)
 
 st.set_page_config(
     page_title="Org Memory Engine",
@@ -61,6 +62,13 @@ st.markdown("""
     color: #666;
     margin-top: 0.5rem;
 }
+.demo-banner {
+    background: linear-gradient(135deg, #fff3e0, #fbe9e7);
+    border: 1px solid #ffb74d;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,6 +77,9 @@ st.markdown("""
 
 @st.cache_data(ttl=60)
 def get_stats() -> dict:
+    if DEMO_MODE:
+        return {"total_documents": 2847, "total_experts": 143,
+                "total_decisions": 312, "total_entities": 1089, "eval_accuracy": 0.92}
     try:
         return requests.get(f"{API_BASE}/stats", timeout=5).json()
     except Exception:
@@ -77,6 +88,8 @@ def get_stats() -> dict:
 
 @st.cache_data(ttl=30)
 def get_health() -> dict:
+    if DEMO_MODE:
+        return {"status": "demo"}
     try:
         return requests.get(f"{API_BASE}/health", timeout=5).json()
     except Exception:
@@ -84,6 +97,8 @@ def get_health() -> dict:
 
 
 def query_api(question: str) -> dict:
+    if DEMO_MODE:
+        return {"_demo": True}
     try:
         return requests.post(
             f"{API_BASE}/query",
@@ -96,6 +111,8 @@ def query_api(question: str) -> dict:
 
 @st.cache_data(ttl=60)
 def get_experts(topic: str) -> list:
+    if DEMO_MODE:
+        return []
     try:
         r = requests.get(f"{API_BASE}/experts/{topic}", timeout=10)
         return r.json().get("experts", [])
@@ -105,11 +122,23 @@ def get_experts(topic: str) -> list:
 
 @st.cache_data(ttl=60)
 def get_decisions(system: str) -> list:
+    if DEMO_MODE:
+        return []
     try:
         r = requests.get(f"{API_BASE}/decisions/{system}", timeout=10)
         return r.json().get("decisions", [])
     except Exception:
         return []
+
+
+def show_demo_banner():
+    st.markdown(
+        "<div class='demo-banner'>"
+        "<strong>Demo mode</strong> — This page requires a live backend. "
+        "The <strong>Benchmark</strong> page works fully offline with real results."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Sidebar ──────────────────────────────────────────────────────
@@ -120,7 +149,9 @@ with st.sidebar:
     st.divider()
 
     health = get_health()
-    if health.get("status") == "healthy":
+    if health.get("status") == "demo":
+        st.warning("Demo mode — Benchmark only")
+    elif health.get("status") == "healthy":
         st.success("All systems healthy")
     else:
         st.error(f"Status: {health.get('status', 'offline')}")
@@ -169,6 +200,10 @@ if page == "💬 Ask":
         "to return sourced, specific answers."
     )
 
+    if DEMO_MODE:
+        show_demo_banner()
+        st.stop()
+
     EXAMPLES = [
         "Why did Kafka replace ZooKeeper with KRaft?",
         "Who are the main experts on Kafka replication?",
@@ -210,8 +245,12 @@ if page == "💬 Ask":
             result = query_api(active_question)
             wall_ms = int((time.time() - t0) * 1000)
 
-        if "error" in result:
-            st.error(f"API error: {result['error']}")
+        if "error" in result or result.get("_demo"):
+            if result.get("_demo"):
+                st.info("Demo mode — no live backend connected.")
+            else:
+                st.error(f"API error: {result['error']}")
+            st.stop()
 
         # ── Answer ——
         st.markdown("### Answer")
