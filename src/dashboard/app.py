@@ -9,6 +9,7 @@ Run with: streamlit run src/dashboard/app.py
 Make sure FastAPI is running on port 8000 first.
 """
 
+import os
 import time
 import requests
 import pandas as pd
@@ -16,7 +17,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import os
 API_BASE = os.environ.get("API_BASE", "http://localhost:8000").rstrip("/")
 DEMO_MODE = not bool(API_BASE)
 
